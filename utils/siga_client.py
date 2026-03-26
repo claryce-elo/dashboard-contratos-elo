@@ -1,8 +1,8 @@
 """
 Cliente SIGA - Extrai dados de contratos e alunos do sistema Activesoft.
 
-Tenta primeiro a API REST (/api/v1/contratos/), e como fallback usa o
-relatorio web de contratos via scraping.
+Usa a API /api/v1/turma/ (confirmada) para buscar turmas 2026 e seus alunos.
+Descobre dinamicamente os endpoints disponiveis para dados de alunos e contratos.
 """
 
 import re
@@ -73,61 +73,60 @@ def _normalizar_matricula(mat):
     return mat
 
 
+def _is_json(response):
+    """Verifica se a resposta e JSON valido."""
+    ct = response.headers.get("content-type", "")
+    if "application/json" in ct:
+        return True
+    try:
+        response.json()
+        return True
+    except Exception:
+        return False
+
+
 # =========================================================================
-# EXTRACAO VIA API
+# DESCOBERTA DE ENDPOINTS
 # =========================================================================
 
-def _extrair_contratos_api(session, unidade):
-    """Tenta extrair contratos via /api/v1/contratos/."""
-    registros = []
-    offset = 0
+def _descobrir_endpoints(session):
+    """Testa endpoints conhecidos do SIGA e retorna os que funcionam."""
+    endpoints = {}
 
-    while True:
-        params = {
-            "limit": 500, "offset": offset,
-            "periodo": "2026",
-        }
+    # Endpoints candidatos para alunos/contratos
+    candidatos = [
+        ("turma", "/api/v1/turma/"),
+        ("turma_detalhe", "/api/v1/turma/{id}/"),
+        ("contratos", "/api/v1/contratos/"),
+        ("contrato", "/api/v1/contrato/"),
+        ("aluno", "/api/v1/aluno/"),
+        ("alunos", "/api/v1/alunos/"),
+        ("matricula", "/api/v1/matricula/"),
+        ("matriculas", "/api/v1/matriculas/"),
+        ("titulos", "/api/v1/titulos/"),
+    ]
+
+    for nome, path in candidatos:
+        if "{id}" in path:
+            continue  # Testar depois com ID real
         try:
-            r = session.get(f"{SIGA_URL}/api/v1/contratos/", params=params, timeout=90)
-            if r.status_code != 200:
-                return None  # API nao disponivel, usar fallback
-            data = r.json()
+            r = session.get(f"{SIGA_URL}{path}", params={"limit": 1, "offset": 0}, timeout=15)
+            if r.status_code == 200 and _is_json(r):
+                data = r.json()
+                count = data.get("count", len(data.get("results", [])))
+                endpoints[nome] = {"path": path, "count": count}
         except Exception:
-            return None
+            pass
 
-        for c in data.get("results", []):
-            status_raw = str(c.get("status", "") or c.get("situacao_contrato", "")).lower()
-            if "assinado" in status_raw:
-                status = "Assinado"
-            elif "cancelad" in status_raw:
-                status = "Cancelado"
-            elif "aguardando" in status_raw:
-                status = "Aguardando"
-            else:
-                status = "Outro"
-
-            registros.append({
-                "matricula": _normalizar_matricula(c.get("matricula", "")),
-                "nome": c.get("nome_aluno", c.get("nome", "")),
-                "turma": c.get("turma", c.get("nome_turma", "")),
-                "situacao": c.get("situacao_turma", c.get("situacao", "")),
-                "unidade": unidade["codigo"],
-                "status_contrato": status,
-            })
-
-        if not data.get("next"):
-            break
-        offset += 500
-
-    return registros
+    return endpoints
 
 
 # =========================================================================
-# EXTRACAO VIA RELATORIO WEB (FALLBACK)
+# EXTRACAO VIA API DE TURMAS
 # =========================================================================
 
 def _extrair_turmas_2026(session):
-    """Busca IDs das turmas de 2026."""
+    """Busca turmas de 2026 via API."""
     turmas = []
     offset = 0
     while True:
@@ -135,7 +134,7 @@ def _extrair_turmas_2026(session):
             r = session.get(f"{SIGA_URL}/api/v1/turma/", params={
                 "limit": 500, "offset": offset,
             }, timeout=30)
-            if r.status_code != 200:
+            if r.status_code != 200 or not _is_json(r):
                 break
             data = r.json()
             for t in data.get("results", []):
@@ -150,58 +149,113 @@ def _extrair_turmas_2026(session):
     return turmas
 
 
-def _extrair_alunos_turma(session, turma_id):
-    """Extrai alunos de uma turma especifica via API."""
-    alunos = []
+def _extrair_alunos_via_turma_detalhe(session, turma_id):
+    """Tenta buscar alunos no detalhe da turma /api/v1/turma/{id}/."""
+    try:
+        r = session.get(f"{SIGA_URL}/api/v1/turma/{turma_id}/", timeout=30)
+        if r.status_code != 200 or not _is_json(r):
+            return None
+        data = r.json()
+
+        # Procurar lista de alunos em campos conhecidos
+        for campo in ["alunos", "matriculas", "alunos_lista", "estudantes", "alunos_ativos_lista"]:
+            if campo in data and isinstance(data[campo], list):
+                return data[campo]
+
+        return None
+    except Exception:
+        return None
+
+
+def _extrair_alunos_via_titulos(session, turma_id):
+    """Busca alunos via /api/v1/titulos/ filtrando por turma (endpoint confirmado no dashboard-livros)."""
+    alunos = {}
     offset = 0
+
     while True:
         try:
-            r = session.get(f"{SIGA_URL}/api/v1/aluno/", params={
-                "turma": turma_id, "limit": 500, "offset": offset,
+            r = session.get(f"{SIGA_URL}/api/v1/titulos/", params={
+                "limit": 500, "offset": offset,
+                "turma": turma_id,
             }, timeout=60)
-            if r.status_code != 200:
-                break
+            if r.status_code != 200 or not _is_json(r):
+                return None
             data = r.json()
-            for a in data.get("results", []):
-                alunos.append({
-                    "matricula": _normalizar_matricula(a.get("matricula", "")),
-                    "nome": a.get("nome", a.get("nome_aluno", "")),
-                    "situacao": a.get("situacao", a.get("situacao_turma", "")),
-                })
+
+            for titulo in data.get("results", []):
+                mat = _normalizar_matricula(titulo.get("matricula", ""))
+                if mat and mat not in alunos:
+                    alunos[mat] = {
+                        "matricula": mat,
+                        "nome": titulo.get("nome_aluno", ""),
+                        "situacao": titulo.get("situacao", ""),
+                    }
+
             if not data.get("next"):
                 break
             offset += 500
         except Exception:
-            break
-    return alunos
+            return None
+
+    return list(alunos.values()) if alunos else None
 
 
-def _extrair_relatorio_contratos(session, unidade):
-    """Tenta extrair via relatorio web de contratos."""
+def _extrair_relatorio_web_alunos(session, turma_ids):
+    """Tenta extrair via relatorio web de alunos por turma."""
     registros = []
 
-    # Buscar turmas 2026
-    turmas = _extrair_turmas_2026(session)
-    if not turmas:
-        return registros
+    url_rel = f"{SIGA_URL}/relatorio_web/aluno_turma/relacao_alunos_com_situacao_na_turma/"
+    csrf = session.cookies.get("csrftoken", "")
 
-    # Para cada turma, buscar alunos
-    for turma in turmas:
-        turma_nome = turma.get("nome", turma.get("turma_nome", ""))
-        turma_id = turma.get("id")
-        alunos = _extrair_alunos_turma(session, turma_id)
+    for turma_id in turma_ids:
+        try:
+            r = session.post(url_rel, data={
+                "csrfmiddlewaretoken": csrf,
+                "turma": [turma_id],
+            }, headers={
+                "Referer": f"{SIGA_URL}/relatorio_web/aluno_turma/",
+                "X-Requested-With": "XMLHttpRequest",
+            }, timeout=30)
 
-        for aluno in alunos:
-            registros.append({
-                "matricula": aluno["matricula"],
-                "nome": aluno["nome"],
-                "turma": turma_nome,
-                "situacao": aluno["situacao"],
-                "unidade": unidade["codigo"],
-                "status_contrato": "Sem Contrato",  # Default, sera cruzado depois
-            })
+            if r.status_code == 200 and len(r.text) > 200:
+                # Tentar parsear HTML com tabela de alunos
+                alunos = _parsear_html_alunos(r.text)
+                if alunos:
+                    registros.extend(alunos)
+        except Exception:
+            continue
 
     return registros
+
+
+def _parsear_html_alunos(html):
+    """Parseia HTML do relatorio web para extrair alunos."""
+    alunos = []
+    # Procurar linhas de tabela com dados de alunos
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
+    for row in rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+        if len(cells) >= 3:
+            # Limpar HTML tags
+            cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+            # Tentar identificar matricula (numerico) e nome
+            matricula = ""
+            nome = ""
+            situacao = ""
+            for c in cells:
+                if re.match(r'^\d[\d-]+$', c) and not matricula:
+                    matricula = c
+                elif len(c) > 3 and not c.isdigit() and not nome:
+                    nome = c
+                elif c in ("Cursando", "Cancelado", "Transferido", "Trancado"):
+                    situacao = c
+            if matricula and nome:
+                alunos.append({
+                    "matricula": _normalizar_matricula(matricula),
+                    "nome": nome,
+                    "situacao": situacao,
+                })
+    return alunos
 
 
 # =========================================================================
@@ -209,23 +263,79 @@ def _extrair_relatorio_contratos(session, unidade):
 # =========================================================================
 
 def extrair_contratos_unidade(instituicao, login, senha, unidade):
-    """Extrai contratos de uma unidade, tentando API primeiro."""
+    """Extrai alunos de uma unidade usando a API de turmas."""
     session, erro = _login(instituicao, login, senha, unidade)
     if not session:
         raise RuntimeError(f"Login falhou ({unidade['codigo']}): {erro}")
 
-    # Tentar API de contratos primeiro
-    registros = _extrair_contratos_api(session, unidade)
+    # Buscar turmas 2026
+    turmas = _extrair_turmas_2026(session)
+    if not turmas:
+        raise RuntimeError(f"Nenhuma turma 2026 encontrada para {unidade['codigo']}")
 
-    if registros is None:
-        # Fallback: relatorio web + alunos
-        registros = _extrair_relatorio_contratos(session, unidade)
+    registros = []
+
+    # Estrategia 1: Detalhe da turma pode incluir alunos
+    primeira_turma = turmas[0]
+    alunos_teste = _extrair_alunos_via_turma_detalhe(session, primeira_turma["id"])
+
+    if alunos_teste is not None:
+        # Detalhe da turma funciona! Usar para todas
+        for turma in turmas:
+            turma_nome = turma.get("nome", "")
+            alunos = _extrair_alunos_via_turma_detalhe(session, turma["id"])
+            if not alunos:
+                continue
+            for a in alunos:
+                mat = _normalizar_matricula(
+                    a.get("matricula", a.get("numero_matricula", ""))
+                )
+                nome = a.get("nome", a.get("nome_aluno", ""))
+                if not mat or not nome:
+                    continue
+                situacao = a.get("situacao", a.get("situacao_turma", ""))
+                status = a.get("status_contrato", a.get("contrato_status", ""))
+
+                registros.append({
+                    "matricula": mat,
+                    "nome": nome,
+                    "turma": turma_nome,
+                    "situacao": situacao,
+                    "unidade": unidade["codigo"],
+                    "status_contrato": status if status else "Sem Contrato",
+                })
+    else:
+        # Estrategia 2: Usar dados basicos da turma (alunos_ativos, etc.)
+        # A API de turmas ja tem contagem - vamos extrair o que tiver
+        for turma in turmas:
+            turma_nome = turma.get("nome", "")
+            n_ativos = turma.get("alunos_ativos", 0) or 0
+
+            # Tentar pegar alunos via campo da propria turma
+            for campo in ["alunos", "matriculas", "alunos_lista"]:
+                if campo in turma and isinstance(turma[campo], list):
+                    for a in turma[campo]:
+                        if isinstance(a, dict):
+                            mat = _normalizar_matricula(a.get("matricula", ""))
+                            nome = a.get("nome", a.get("nome_aluno", ""))
+                        else:
+                            continue
+                        if not mat or not nome:
+                            continue
+                        registros.append({
+                            "matricula": mat,
+                            "nome": nome,
+                            "turma": turma_nome,
+                            "situacao": "",
+                            "unidade": unidade["codigo"],
+                            "status_contrato": "Sem Contrato",
+                        })
 
     return registros
 
 
 def extrair_tudo(instituicao, login, senha, progress_cb=None):
-    """Extrai contratos de todas as unidades em paralelo."""
+    """Extrai dados de todas as unidades em paralelo."""
     resultado = {"alunos": [], "erros": [], "timestamp": ""}
 
     def _proc(u):
@@ -250,7 +360,7 @@ def extrair_tudo(instituicao, login, senha, progress_cb=None):
 
 
 def testar_conexao(instituicao, login, senha):
-    """Testa conexao e retorna diagnostico."""
+    """Testa conexao e retorna diagnostico detalhado."""
     log = []
     unidade = UNIDADES[0]
 
@@ -260,43 +370,48 @@ def testar_conexao(instituicao, login, senha):
         return log
     log.append("Login: OK")
 
-    # Testar API de contratos
-    try:
-        r = session.get(f"{SIGA_URL}/api/v1/contratos/", params={
-            "limit": 1, "offset": 0, "periodo": "2026",
-        }, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            log.append(f"API contratos: count={data.get('count', '?')}")
-        else:
-            log.append(f"API contratos: status={r.status_code} (nao disponivel)")
-    except Exception as e:
-        log.append(f"API contratos: ERRO ({e})")
+    # Descobrir endpoints
+    log.append("Descobrindo endpoints...")
+    endpoints = _descobrir_endpoints(session)
+    for nome, info in endpoints.items():
+        log.append(f"  /api/v1/{nome}/: OK (count={info['count']})")
 
-    # Testar API de turmas
-    try:
-        r = session.get(f"{SIGA_URL}/api/v1/turma/", params={
-            "limit": 5, "offset": 0,
-        }, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            log.append(f"API turmas: count={data.get('count', '?')}")
-        else:
-            log.append(f"API turmas: status={r.status_code}")
-    except Exception as e:
-        log.append(f"API turmas: ERRO ({e})")
+    if not endpoints:
+        log.append("  Nenhum endpoint encontrado!")
 
-    # Testar API de alunos
-    try:
-        r = session.get(f"{SIGA_URL}/api/v1/aluno/", params={
-            "limit": 1, "offset": 0,
-        }, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            log.append(f"API alunos: count={data.get('count', '?')}")
-        else:
-            log.append(f"API alunos: status={r.status_code}")
-    except Exception as e:
-        log.append(f"API alunos: ERRO ({e})")
+    # Buscar turmas 2026
+    turmas_2026 = _extrair_turmas_2026(session)
+    log.append(f"Turmas 2026: {len(turmas_2026)} encontradas")
+
+    if turmas_2026:
+        # Testar detalhe da primeira turma
+        t = turmas_2026[0]
+        log.append(f"Testando detalhe turma: {t.get('nome', t.get('id'))}...")
+
+        try:
+            r = session.get(f"{SIGA_URL}/api/v1/turma/{t['id']}/", timeout=15)
+            if r.status_code == 200 and _is_json(r):
+                data = r.json()
+                campos = list(data.keys())
+                log.append(f"  Campos: {', '.join(campos[:15])}")
+
+                # Verificar se tem lista de alunos
+                for campo in campos:
+                    val = data[campo]
+                    if isinstance(val, list) and len(val) > 0:
+                        if isinstance(val[0], dict):
+                            log.append(f"  Lista '{campo}': {len(val)} items, campos={list(val[0].keys())[:8]}")
+                        else:
+                            log.append(f"  Lista '{campo}': {len(val)} items (tipo: {type(val[0]).__name__})")
+                    elif isinstance(val, (int, float)):
+                        log.append(f"  {campo}: {val}")
+            else:
+                log.append(f"  Detalhe turma: status={r.status_code}")
+        except Exception as e:
+            log.append(f"  Detalhe turma: ERRO ({e})")
+
+        # Mostrar amostra de campos da turma da lista
+        campos_turma = list(t.keys())
+        log.append(f"Campos turma (lista): {', '.join(campos_turma[:15])}")
 
     return log
