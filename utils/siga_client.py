@@ -179,58 +179,77 @@ def _explorar_pagina_contratos(session):
     return info
 
 
-def _extrair_contratos_api(session, competencia="2026"):
-    """Tenta extrair contratos via API descoberta."""
-    registros = []
+def _explorar_endpoints_contratos(session, competencia="2026"):
+    """Testa todos os endpoints descobertos nos JS da pagina de contratos.
 
-    # Tentar endpoints comuns para contratos
-    endpoints_candidatos = [
-        f"/assinatura_eletronica/contratos/api/",
-        f"/assinatura_eletronica/contratos/lista/",
-        f"/assinatura_eletronica/contratos/json/",
-        f"/assinatura_eletronica/api/contratos/",
-        f"/api/v1/assinatura_eletronica/contratos/",
-        f"/api/v1/contrato_assinatura/",
+    Endpoints encontrados nos JS:
+      - baseURL + /situacao_contratos/
+      - /api/v1/assinatura_eletronica/dashboard/documentos/indicador/
+      - /api/v1/turmas/ (com 's')
+    """
+    resultados = []
+
+    # Endpoints reais extraidos do JS do SPA
+    endpoints = [
+        # Situacao dos contratos (encontrado no JS: this.baseURL + "/situacao_contratos/")
+        "/api/v1/assinatura_eletronica/situacao_contratos/",
+        "/api/v1/assinatura_eletronica/contratos/situacao_contratos/",
+        "/assinatura_eletronica/contratos/situacao_contratos/",
+        "/assinatura_eletronica/situacao_contratos/",
+        # Dashboard indicadores (encontrado no JS)
+        "/api/v1/assinatura_eletronica/dashboard/documentos/indicador/",
+        # Documentos/contratos
+        "/api/v1/assinatura_eletronica/documentos/",
+        "/api/v1/assinatura_eletronica/contratos/",
+        "/api/v1/assinatura_eletronica/contratos/documentos/",
+        "/api/v1/assinatura_eletronica/",
+        # Turmas com 's' (encontrado no JS, diferente de /turma/)
+        "/api/v1/turmas/",
     ]
 
-    for endpoint in endpoints_candidatos:
-        try:
-            # Tentar GET com filtro
-            r = session.get(f"{SIGA_URL}{endpoint}", params={
-                "competencia": competencia,
-                "limit": 500, "offset": 0,
-            }, timeout=30)
+    params_variantes = [
+        {"competencia": competencia},
+        {"competencia": competencia, "limit": 500, "offset": 0},
+        {"ano": competencia},
+        {"periodo": competencia},
+        {"limit": 500, "offset": 0},
+        {},
+    ]
 
-            if r.status_code == 200 and _is_json(r):
-                data = r.json()
-                if isinstance(data, list):
-                    return endpoint, data
-                elif isinstance(data, dict) and "results" in data:
-                    return endpoint, data["results"]
-        except Exception:
-            pass
+    for endpoint in endpoints:
+        for params in params_variantes:
+            try:
+                r = session.get(f"{SIGA_URL}{endpoint}", params=params, timeout=20,
+                    headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"})
+                if r.status_code == 200 and _is_json(r):
+                    data = r.json()
+                    info = {
+                        "endpoint": endpoint,
+                        "params": params,
+                        "tipo": type(data).__name__,
+                    }
+                    if isinstance(data, list):
+                        info["count"] = len(data)
+                        if data:
+                            info["campos"] = list(data[0].keys()) if isinstance(data[0], dict) else []
+                            info["amostra"] = data[0]
+                    elif isinstance(data, dict):
+                        info["keys"] = list(data.keys())
+                        if "results" in data:
+                            info["count"] = data.get("count", len(data["results"]))
+                            if data["results"]:
+                                info["campos"] = list(data["results"][0].keys()) if isinstance(data["results"][0], dict) else []
+                                info["amostra"] = data["results"][0]
+                        elif "count" in data:
+                            info["count"] = data["count"]
+                        else:
+                            info["amostra"] = {k: v for k, v in list(data.items())[:8]}
+                    resultados.append(info)
+                    break  # Encontrou params que funcionam, nao testar mais
+            except Exception:
+                continue
 
-        try:
-            # Tentar POST com filtro
-            csrf = session.cookies.get("csrftoken", "")
-            r = session.post(f"{SIGA_URL}{endpoint}", data={
-                "csrfmiddlewaretoken": csrf,
-                "competencia": competencia,
-            }, headers={
-                "Referer": CONTRATOS_URL,
-                "X-Requested-With": "XMLHttpRequest",
-            }, timeout=30)
-
-            if r.status_code == 200 and _is_json(r):
-                data = r.json()
-                if isinstance(data, list):
-                    return endpoint, data
-                elif isinstance(data, dict) and "results" in data:
-                    return endpoint, data["results"]
-        except Exception:
-            pass
-
-    return None, []
+    return resultados
 
 
 def _parsear_contratos_html(session, competencia="2026"):
@@ -491,7 +510,7 @@ def extrair_tudo(instituicao, login, senha, progress_cb=None):
 # =========================================================================
 
 def testar_conexao(instituicao, login, senha):
-    """Testa conexao e explora pagina de contratos em profundidade."""
+    """Testa conexao e explora endpoints de contratos."""
     log = []
     unidade = UNIDADES[0]
 
@@ -501,51 +520,35 @@ def testar_conexao(instituicao, login, senha):
         return log
     log.append("Login: OK")
 
-    # Explorar pagina de contratos
-    log.append(f"Explorando {CONTRATOS_URL}...")
-    info = _explorar_pagina_contratos(session)
-    log.append(f"  Status: {info.get('status')}, HTML: {info.get('html_size', 0)} bytes")
+    # Testar todos os endpoints descobertos
+    log.append("Testando endpoints de contratos...")
+    resultados = _explorar_endpoints_contratos(session)
 
-    if info.get("erro"):
-        log.append(f"  ERRO: {info['erro']}")
+    if not resultados:
+        log.append("  Nenhum endpoint respondeu JSON")
+    else:
+        for r in resultados:
+            ep = r["endpoint"]
+            params = r.get("params", {})
+            params_str = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
+            log.append(f"  ENCONTRADO: {ep}{'?' + params_str if params_str else ''}")
+            log.append(f"    Tipo: {r.get('tipo')}, Count: {r.get('count', '?')}")
 
-    # Div IDs (hints de framework SPA)
-    if info.get("div_ids"):
-        log.append(f"  Div IDs: {info['div_ids']}")
-
-    # Amostra do body
-    if info.get("body_amostra"):
-        log.append(f"  Body: {info['body_amostra'][:300]}")
-
-    # Arquivos JS
-    if info.get("js_files"):
-        log.append(f"  JS carregados ({len(info['js_files'])}):")
-        for js in info["js_files"]:
-            log.append(f"    {js}")
-
-    # URLs no HTML
-    if info.get("api_urls_html"):
-        log.append(f"  URLs no HTML:")
-        for url in info["api_urls_html"][:10]:
-            log.append(f"    {url}")
-
-    # Inline scripts
-    if info.get("scripts_inline"):
-        log.append(f"  Scripts inline ({len(info['scripts_inline'])}):")
-        for s in info["scripts_inline"][:5]:
-            log.append(f"    {s[:150]}")
-
-    # URLs encontradas nos JS externos
-    if info.get("js_api_urls"):
-        log.append(f"  URLs nos JS externos:")
-        for url in info["js_api_urls"][:15]:
-            log.append(f"    {url}")
-
-    # Refs a contratos nos JS
-    if info.get("js_contrato_refs"):
-        log.append(f"  Refs 'contrato' nos JS:")
-        for ref in info["js_contrato_refs"][:8]:
-            log.append(f"    {ref}")
+            if r.get("keys"):
+                log.append(f"    Keys: {r['keys']}")
+            if r.get("campos"):
+                log.append(f"    Campos: {r['campos']}")
+            if r.get("amostra"):
+                amostra = r["amostra"]
+                if isinstance(amostra, dict):
+                    # Mascarar dados sensiveis
+                    safe = {}
+                    for k, v in list(amostra.items())[:12]:
+                        if "nome" in k.lower() and isinstance(v, str):
+                            safe[k] = "(presente)"
+                        else:
+                            safe[k] = str(v)[:60] if v is not None else None
+                    log.append(f"    Amostra: {json.dumps(safe, ensure_ascii=False)}")
 
     # Turmas
     turmas = _extrair_turmas_2026(session)
