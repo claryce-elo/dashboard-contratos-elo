@@ -86,8 +86,8 @@ def _is_json(response):
 # =========================================================================
 
 def _explorar_pagina_contratos(session):
-    """Acessa a pagina de contratos e descobre como buscar dados."""
-    info = {"url": CONTRATOS_URL, "status": None, "tipo": None, "dados": None, "erro": None}
+    """Acessa a pagina de contratos e analisa profundamente o HTML e JS."""
+    info = {"url": CONTRATOS_URL, "status": None, "tipo": None, "erro": None}
 
     try:
         r = session.get(CONTRATOS_URL, timeout=30)
@@ -100,65 +100,78 @@ def _explorar_pagina_contratos(session):
         ct = r.headers.get("content-type", "")
         info["tipo"] = ct
 
-        # Se retornou JSON direto
         if "application/json" in ct:
             info["dados"] = r.json()
             return info
 
-        # Se retornou HTML, analisar a pagina
         html = r.text
         info["html_size"] = len(html)
 
-        # Procurar endpoints de API nos scripts
+        # 1. Encontrar arquivos JS carregados pela pagina
+        js_srcs = re.findall(r'<script[^>]*src=["\']([^"\']+)["\']', html)
+        info["js_files"] = js_srcs
+
+        # 2. URLs encontradas no HTML inline
         api_urls = set()
         for pattern in [
-            r'["\'](/api/v1/[^"\']+)["\']',
-            r'["\'](/assinatura_eletronica/[^"\']+)["\']',
-            r'url\s*[=:]\s*["\']([^"\']+contratos?[^"\']*)["\']',
-            r'fetch\s*\(\s*["\']([^"\']+)["\']',
-            r'ajax\s*\(\s*[{]?\s*url\s*:\s*["\']([^"\']+)["\']',
-            r'\.get\s*\(\s*["\']([^"\']+)["\']',
-            r'\.post\s*\(\s*["\']([^"\']+)["\']',
+            r'["\'](/api/v[^"\']+)["\']',
+            r'["\'](/assinatura[^"\']+)["\']',
+            r'["\'](https?://[^"\']*contrat[^"\']*)["\']',
         ]:
-            matches = re.findall(pattern, html)
-            api_urls.update(matches)
+            api_urls.update(re.findall(pattern, html))
+        info["api_urls_html"] = list(api_urls)
 
-        info["api_urls"] = list(api_urls)
+        # 3. Inline scripts - mostrar conteudo resumido
+        scripts_inline = re.findall(r'<script(?:\s[^>]*)?>([^<]+)</script>', html, re.DOTALL)
+        info["scripts_inline"] = [s.strip()[:200] for s in scripts_inline if s.strip() and len(s.strip()) > 10]
 
-        # Procurar formularios de filtro
-        forms = re.findall(r'<form[^>]*>(.*?)</form>', html, re.DOTALL)
-        selects = re.findall(r'<select[^>]*name=["\']([^"\']+)["\'][^>]*>', html)
-        inputs = re.findall(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*>', html)
-        info["form_fields"] = {"selects": selects, "inputs": inputs}
+        # 4. Amostra do HTML body (sem tags de estilo/head)
+        body_match = re.search(r'<body[^>]*>(.*)</body>', html, re.DOTALL)
+        if body_match:
+            body = body_match.group(1)
+            # Remover scripts e styles inline
+            body_clean = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL)
+            body_clean = re.sub(r'<style[^>]*>.*?</style>', '', body_clean, flags=re.DOTALL)
+            body_clean = re.sub(r'\s+', ' ', body_clean).strip()
+            info["body_amostra"] = body_clean[:500]
 
-        # Procurar dados inline (JSON em script tags)
-        scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
-        for script in scripts:
-            # Dados de contratos em variaveis JS
-            for var_pattern in [
-                r'(?:var|let|const)\s+\w*contrat\w*\s*=\s*(\[.*?\]);',
-                r'(?:var|let|const)\s+\w*dados?\w*\s*=\s*(\[.*?\]);',
-                r'data\s*:\s*(\[{.*?}\])',
-            ]:
-                m = re.search(var_pattern, script, re.DOTALL | re.IGNORECASE)
-                if m:
-                    try:
-                        info["dados_inline"] = json.loads(m.group(1))[:3]
-                    except Exception:
-                        info["dados_inline_raw"] = m.group(1)[:300]
+        # 5. IDs e classes relevantes (hints de framework)
+        divs_id = re.findall(r'<div[^>]*id=["\']([^"\']+)["\']', html)
+        info["div_ids"] = divs_id
 
-        # Procurar tabela HTML com dados de contratos
-        tables = re.findall(r'<table[^>]*>(.*?)</table>', html, re.DOTALL)
-        if tables:
-            info["tabelas"] = len(tables)
-            # Tentar parsear primeira tabela
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.DOTALL)
-            if rows:
-                info["linhas_tabela"] = len(rows)
-                # Headers
-                headers = re.findall(r'<th[^>]*>(.*?)</th>', rows[0], re.DOTALL)
-                headers = [re.sub(r'<[^>]+>', '', h).strip() for h in headers]
-                info["headers_tabela"] = headers
+        # 6. Vasculhar arquivos JS externos para encontrar endpoints
+        js_api_urls = set()
+        for js_src in js_srcs:
+            if "jquery" in js_src.lower() or "bootstrap" in js_src.lower():
+                continue
+            full_url = js_src if js_src.startswith("http") else f"{SIGA_URL}{js_src}"
+            try:
+                r_js = session.get(full_url, timeout=15)
+                if r_js.status_code == 200 and len(r_js.text) > 50:
+                    js_text = r_js.text
+                    # Procurar URLs de API no JS
+                    for p in [
+                        r'["\'](/api/v[^"\']{3,60})["\']',
+                        r'["\'](/assinatura_eletronica/[^"\']{3,80})["\']',
+                        r'url\s*[=:]\s*["\']([^"\']{5,80})["\']',
+                        r'endpoint\s*[=:]\s*["\']([^"\']{5,80})["\']',
+                        r'baseURL\s*[=:]\s*["\']([^"\']{5,80})["\']',
+                    ]:
+                        js_api_urls.update(re.findall(p, js_text))
+
+                    # Procurar referencias a contratos/competencia
+                    contrato_refs = re.findall(
+                        r'.{0,40}(?:contrat|competencia|assinatura).{0,60}',
+                        js_text, re.IGNORECASE
+                    )
+                    if contrato_refs:
+                        info.setdefault("js_contrato_refs", []).extend(
+                            [ref.strip()[:120] for ref in contrato_refs[:5]]
+                        )
+            except Exception:
+                continue
+
+        info["js_api_urls"] = list(js_api_urls)
 
     except Exception as e:
         info["erro"] = str(e)
@@ -478,7 +491,7 @@ def extrair_tudo(instituicao, login, senha, progress_cb=None):
 # =========================================================================
 
 def testar_conexao(instituicao, login, senha):
-    """Testa conexao e explora pagina de contratos."""
+    """Testa conexao e explora pagina de contratos em profundidade."""
     log = []
     unidade = UNIDADES[0]
 
@@ -489,65 +502,50 @@ def testar_conexao(instituicao, login, senha):
     log.append("Login: OK")
 
     # Explorar pagina de contratos
-    log.append(f"Acessando {CONTRATOS_URL}...")
+    log.append(f"Explorando {CONTRATOS_URL}...")
     info = _explorar_pagina_contratos(session)
-    log.append(f"  Status: {info.get('status')}")
-    log.append(f"  Tipo: {info.get('tipo', 'N/A')}")
+    log.append(f"  Status: {info.get('status')}, HTML: {info.get('html_size', 0)} bytes")
 
     if info.get("erro"):
         log.append(f"  ERRO: {info['erro']}")
 
-    if info.get("html_size"):
-        log.append(f"  HTML: {info['html_size']} bytes")
+    # Div IDs (hints de framework SPA)
+    if info.get("div_ids"):
+        log.append(f"  Div IDs: {info['div_ids']}")
 
-    if info.get("api_urls"):
-        log.append(f"  URLs encontradas:")
-        for url in info["api_urls"][:10]:
+    # Amostra do body
+    if info.get("body_amostra"):
+        log.append(f"  Body: {info['body_amostra'][:300]}")
+
+    # Arquivos JS
+    if info.get("js_files"):
+        log.append(f"  JS carregados ({len(info['js_files'])}):")
+        for js in info["js_files"]:
+            log.append(f"    {js}")
+
+    # URLs no HTML
+    if info.get("api_urls_html"):
+        log.append(f"  URLs no HTML:")
+        for url in info["api_urls_html"][:10]:
             log.append(f"    {url}")
 
-    if info.get("form_fields"):
-        ff = info["form_fields"]
-        if ff.get("selects"):
-            log.append(f"  Selects: {ff['selects']}")
-        if ff.get("inputs"):
-            log.append(f"  Inputs: {ff['inputs']}")
+    # Inline scripts
+    if info.get("scripts_inline"):
+        log.append(f"  Scripts inline ({len(info['scripts_inline'])}):")
+        for s in info["scripts_inline"][:5]:
+            log.append(f"    {s[:150]}")
 
-    if info.get("tabelas"):
-        log.append(f"  Tabelas HTML: {info['tabelas']}")
-        if info.get("linhas_tabela"):
-            log.append(f"  Linhas: {info['linhas_tabela']}")
-        if info.get("headers_tabela"):
-            log.append(f"  Headers: {info['headers_tabela']}")
+    # URLs encontradas nos JS externos
+    if info.get("js_api_urls"):
+        log.append(f"  URLs nos JS externos:")
+        for url in info["js_api_urls"][:15]:
+            log.append(f"    {url}")
 
-    if info.get("dados"):
-        log.append(f"  JSON direto: {json.dumps(info['dados'], ensure_ascii=False)[:200]}")
-
-    if info.get("dados_inline"):
-        log.append(f"  Dados inline: {json.dumps(info['dados_inline'], ensure_ascii=False)[:200]}")
-    elif info.get("dados_inline_raw"):
-        log.append(f"  Dados inline (raw): {info['dados_inline_raw']}")
-
-    # Tentar API de contratos
-    log.append("Tentando endpoints de API...")
-    endpoint, dados = _extrair_contratos_api(session)
-    if endpoint:
-        log.append(f"  Endpoint encontrado: {endpoint}")
-        log.append(f"  Registros: {len(dados)}")
-        if dados:
-            log.append(f"  Campos: {list(dados[0].keys())}")
-            log.append(f"  Amostra: {json.dumps(dados[0], ensure_ascii=False)[:200]}")
-    else:
-        log.append("  Nenhum endpoint API funcionou")
-
-    # Tentar HTML
-    log.append("Tentando parsear HTML...")
-    dados_html = _parsear_contratos_html(session)
-    if dados_html:
-        log.append(f"  Contratos parseados: {len(dados_html)}")
-        if dados_html:
-            log.append(f"  Amostra: {json.dumps(dados_html[0], ensure_ascii=False)[:200]}")
-    else:
-        log.append("  Nenhum contrato encontrado no HTML")
+    # Refs a contratos nos JS
+    if info.get("js_contrato_refs"):
+        log.append(f"  Refs 'contrato' nos JS:")
+        for ref in info["js_contrato_refs"][:8]:
+            log.append(f"    {ref}")
 
     # Turmas
     turmas = _extrair_turmas_2026(session)
