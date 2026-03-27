@@ -510,7 +510,7 @@ def extrair_tudo(instituicao, login, senha, progress_cb=None):
 # =========================================================================
 
 def testar_conexao(instituicao, login, senha):
-    """Testa conexao e explora endpoints de contratos."""
+    """Testa conexao, busca contratos e tenta obter dados do aluno."""
     log = []
     unidade = UNIDADES[0]
 
@@ -520,35 +520,76 @@ def testar_conexao(instituicao, login, senha):
         return log
     log.append("Login: OK")
 
-    # Testar todos os endpoints descobertos
-    log.append("Testando endpoints de contratos...")
-    resultados = _explorar_endpoints_contratos(session)
+    # 1. Buscar contratos
+    log.append("Buscando contratos 2026...")
+    try:
+        r = session.get(f"{SIGA_URL}/api/v1/assinatura_eletronica/", params={
+            "competencia": "2026",
+        }, timeout=60, headers={"Accept": "application/json"})
 
-    if not resultados:
-        log.append("  Nenhum endpoint respondeu JSON")
-    else:
-        for r in resultados:
-            ep = r["endpoint"]
-            params = r.get("params", {})
-            params_str = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
-            log.append(f"  ENCONTRADO: {ep}{'?' + params_str if params_str else ''}")
-            log.append(f"    Tipo: {r.get('tipo')}, Count: {r.get('count', '?')}")
+        if r.status_code == 200 and _is_json(r):
+            data = r.json()
+            contratos = data if isinstance(data, list) else data.get("results", [])
+            log.append(f"  Contratos: {len(contratos)}")
 
-            if r.get("keys"):
-                log.append(f"    Keys: {r['keys']}")
-            if r.get("campos"):
-                log.append(f"    Campos: {r['campos']}")
-            if r.get("amostra"):
-                amostra = r["amostra"]
-                if isinstance(amostra, dict):
-                    # Mascarar dados sensiveis
-                    safe = {}
-                    for k, v in list(amostra.items())[:12]:
-                        if "nome" in k.lower() and isinstance(v, str):
-                            safe[k] = "(presente)"
+            if contratos:
+                # Mostrar TODOS os campos do primeiro registro (sem truncar)
+                c = contratos[0]
+                log.append(f"  Todos os campos ({len(c.keys())}):")
+                for k, v in c.items():
+                    val_str = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+                    if len(val_str) > 100:
+                        val_str = val_str[:100] + "..."
+                    log.append(f"    {k}: {val_str}")
+
+                # Contar por situacao
+                situacoes = {}
+                for ct in contratos:
+                    sit = ct.get("situacao_assinatura_label", "?")
+                    situacoes[sit] = situacoes.get(sit, 0) + 1
+                log.append(f"  Por situacao: {json.dumps(situacoes, ensure_ascii=False)}")
+
+                # 2. Tentar detalhe do primeiro contrato
+                cid = c.get("id")
+                log.append(f"  Testando detalhe /api/v1/assinatura_eletronica/{cid}/...")
+                try:
+                    r2 = session.get(f"{SIGA_URL}/api/v1/assinatura_eletronica/{cid}/",
+                        timeout=15, headers={"Accept": "application/json"})
+                    if r2.status_code == 200 and _is_json(r2):
+                        detalhe = r2.json()
+                        campos_extra = set(detalhe.keys()) - set(c.keys())
+                        if campos_extra:
+                            log.append(f"    Campos EXTRAS no detalhe: {list(campos_extra)}")
+                            for ce in campos_extra:
+                                val = detalhe[ce]
+                                val_str = json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list)) else str(val)
+                                log.append(f"      {ce}: {val_str[:150]}")
                         else:
-                            safe[k] = str(v)[:60] if v is not None else None
-                    log.append(f"    Amostra: {json.dumps(safe, ensure_ascii=False)}")
+                            log.append(f"    Detalhe: mesmos campos da lista")
+                    else:
+                        log.append(f"    Detalhe: status={r2.status_code}")
+                except Exception as e:
+                    log.append(f"    Detalhe: ERRO ({e})")
+
+                # 3. Tentar endpoint de signatarios
+                for sub in ["signatarios", "assinantes", "participantes", "aluno"]:
+                    try:
+                        r3 = session.get(f"{SIGA_URL}/api/v1/assinatura_eletronica/{cid}/{sub}/",
+                            timeout=10, headers={"Accept": "application/json"})
+                        if r3.status_code == 200 and _is_json(r3):
+                            sig_data = r3.json()
+                            log.append(f"    Sub-endpoint /{sub}/: OK")
+                            if isinstance(sig_data, list) and sig_data:
+                                log.append(f"      Campos: {list(sig_data[0].keys())}")
+                                log.append(f"      Amostra: {json.dumps(sig_data[0], ensure_ascii=False)[:200]}")
+                            elif isinstance(sig_data, dict):
+                                log.append(f"      Keys: {list(sig_data.keys())}")
+                    except Exception:
+                        pass
+        else:
+            log.append(f"  Status: {r.status_code}")
+    except Exception as e:
+        log.append(f"  ERRO: {e}")
 
     # Turmas
     turmas = _extrair_turmas_2026(session)
