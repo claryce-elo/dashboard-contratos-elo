@@ -166,8 +166,8 @@ def main():
 
     # ── Tabs ────────────────────────────────────────────────────────
     st.markdown("---")
-    tab1, tab2, tab3 = st.tabs([
-        "📊 Por Unidade", "📚 Por Segmento", "📋 Lista Detalhada"
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Por Unidade", "📚 Por Segmento", "📋 Lista Detalhada", "✍️ Signatários Pendentes"
     ])
 
     def fazer_pivot(df, group_col):
@@ -247,6 +247,97 @@ def main():
             f"contratos_2027_{datetime.now().strftime('%Y%m%d')}.csv",
             "text/csv",
         )
+
+    with tab4:
+        st.subheader("Signatários Pendentes")
+        st.caption("Contratos aguardando assinatura — quem já assinou e quem falta")
+
+        # Montar tabela de signatários a partir dos contratos com signatarios
+        sig_rows = []
+        aluno_turma_ids_cursando = set(df_alunos["id_aluno_turma"].tolist())
+        for _, c in df_contratos.iterrows():
+            sigs = c.get("signatarios")
+            if not sigs or not isinstance(sigs, list) or len(sigs) == 0:
+                continue
+            if c.get("aluno_turma_id") not in aluno_turma_ids_cursando:
+                continue
+            if c.get("unidade") not in unidades_sel:
+                continue
+            seg = c.get("segmento", "")
+            if seg not in segmentos_sel:
+                continue
+            for s in sigs:
+                sig_rows.append({
+                    "unidade": c.get("unidade"),
+                    "matricula": c.get("matricula"),
+                    "aluno": c.get("nome"),
+                    "serie": c.get("serie"),
+                    "signatario": s.get("tipo", "").replace("_", " ").title(),
+                    "nome_signatario": s.get("nome"),
+                    "assinou": "Sim" if s.get("assinou") else "Pendente",
+                })
+
+        if sig_rows:
+            df_sig = pd.DataFrame(sig_rows)
+
+            # Resumo por tipo de signatário
+            st.markdown("#### Resumo por tipo de signatário")
+            pivot_sig = df_sig.groupby(["signatario", "assinou"]).size().unstack(fill_value=0)
+            for col in ["Sim", "Pendente"]:
+                if col not in pivot_sig.columns:
+                    pivot_sig[col] = 0
+            pivot_sig = pivot_sig[["Sim", "Pendente"]]
+            pivot_sig["Total"] = pivot_sig.sum(axis=1)
+            pivot_sig["% Assinado"] = (pivot_sig["Sim"] / pivot_sig["Total"] * 100).round(1)
+            st.dataframe(pivot_sig, use_container_width=True)
+
+            # Resumo por unidade x signatário
+            st.markdown("#### Pendentes por Unidade e Signatário")
+            pendentes = df_sig[df_sig["assinou"] == "Pendente"]
+            if not pendentes.empty:
+                pivot_uni_sig = (
+                    pendentes.groupby(["unidade", "signatario"])
+                    .size()
+                    .unstack(fill_value=0)
+                )
+                st.dataframe(pivot_uni_sig, use_container_width=True)
+
+            # Lista detalhada de pendentes
+            st.markdown("#### Lista de Signatários Pendentes")
+            busca_sig = st.text_input("🔍 Buscar por nome do aluno ou signatário", key="busca_sig")
+            df_pendentes = df_sig[df_sig["assinou"] == "Pendente"].sort_values(
+                ["unidade", "serie", "aluno", "signatario"]
+            )
+            if busca_sig:
+                df_pendentes = df_pendentes[
+                    df_pendentes["aluno"].str.contains(busca_sig, case=False, na=False)
+                    | df_pendentes["nome_signatario"].str.contains(busca_sig, case=False, na=False)
+                ]
+
+            st.dataframe(
+                df_pendentes,
+                use_container_width=True,
+                height=500,
+                column_config={
+                    "unidade": "Unidade",
+                    "matricula": "Matrícula",
+                    "aluno": "Aluno",
+                    "serie": "Série",
+                    "signatario": "Tipo Signatário",
+                    "nome_signatario": "Nome do Signatário",
+                    "assinou": "Status",
+                },
+            )
+
+            csv_sig = df_pendentes.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Baixar Pendentes CSV",
+                csv_sig,
+                f"signatarios_pendentes_{datetime.now().strftime('%Y%m%d')}.csv",
+                "text/csv",
+            )
+        else:
+            st.info("Dados de signatários não disponíveis. Execute a coleta novamente.")
 
 
 if __name__ == "__main__":

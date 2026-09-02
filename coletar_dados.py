@@ -148,9 +148,11 @@ def coletar_unidade(unidade):
         })
 
     # Processar contratos
+    aluno_turma_ids = {a["id_aluno_turma"] for a in alunos}
     contratos = []
+    contratos_aguardando_ids = []
     for c in contratos_raw:
-        contratos.append({
+        info = {
             "id": c.get("id"),
             "aluno_turma_id": c.get("aluno_turma_id"),
             "aluno_id": c.get("aluno_id"),
@@ -166,7 +168,40 @@ def coletar_unidade(unidade):
             "data_assinatura": c.get("data_assinatura_confirmada"),
             "data_cancelamento": c.get("data_cancelamento"),
             "contrato_cancelado": c.get("contrato_cancelado_clicksign"),
-        })
+            "signatarios": [],
+        }
+        contratos.append(info)
+        # Coletar signatários apenas de contratos aguardando de alunos cursando
+        if (c.get("situacao_assinatura_label") == "Aguardando assinatura"
+                and c.get("aluno_turma_id") in aluno_turma_ids):
+            contratos_aguardando_ids.append((info, c.get("id")))
+
+    # 3. Buscar signatários dos contratos aguardando assinatura
+    print(f"  {sigla}: buscando signatários de {len(contratos_aguardando_ids)} contratos...", flush=True)
+    for i, (info, cid) in enumerate(contratos_aguardando_ids):
+        try:
+            r = session.get(
+                f"{BASE_URL}/api/v1/assinatura_eletronica/documento/{cid}/signatarios/",
+                timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                sigs = data.get("signatarios", [])
+                info["signatarios"] = [
+                    {
+                        "tipo": s.get("tipo_signatario"),
+                        "nome": s.get("nome_signatario"),
+                        "assinou": s.get("data_hora_assinatura") is not None,
+                        "data_assinatura": s.get("data_hora_assinatura"),
+                    }
+                    for s in sigs
+                ]
+        except Exception:
+            pass
+        time.sleep(0.05)
+        if (i + 1) % 50 == 0:
+            print(f"    Progresso signatários: {i+1}/{len(contratos_aguardando_ids)}", flush=True)
+    print(f"  {sigla}: signatários coletados", flush=True)
 
     return {
         "unidade": sigla,
