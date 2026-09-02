@@ -104,6 +104,26 @@ def classificar_aluno(at_id, contratos_do_aluno):
     return "Sem contrato"
 
 
+TIPOS_SIGNATARIO = ["Contratante", "Contratado", "Testemunha 1", "Testemunha 2", "Responsavel Secundario"]
+
+
+def signatarios_pendentes(contratos_do_aluno):
+    """Retorna lista de tipos de signatário pendentes do contrato mais recente."""
+    if not contratos_do_aluno:
+        return []
+    # Pegar contrato mais recente com signatários
+    com_sigs = [c for c in contratos_do_aluno if c.get("signatarios")]
+    if not com_sigs:
+        return []
+    mais_recente = max(com_sigs, key=lambda c: c.get("id", 0))
+    pendentes = []
+    for s in mais_recente.get("signatarios", []):
+        if not s.get("assinou"):
+            tipo = s.get("tipo", "").replace("_", " ").title()
+            pendentes.append(tipo)
+    return pendentes
+
+
 def build_summary(df_alunos, df_contratos):
     # Agrupar contratos por aluno_turma_id
     contratos_por_at = {}
@@ -115,6 +135,9 @@ def build_summary(df_alunos, df_contratos):
     df = df_alunos.copy()
     df["status_contrato"] = df["id_aluno_turma"].apply(
         lambda at_id: classificar_aluno(at_id, contratos_por_at.get(at_id))
+    )
+    df["pendencias"] = df["id_aluno_turma"].apply(
+        lambda at_id: signatarios_pendentes(contratos_por_at.get(at_id, []))
     )
     return df
 
@@ -240,16 +263,34 @@ def main():
     with tab3:
         st.subheader("Lista de Alunos")
 
+        # Filtro por pendência de signatário
+        col_busca, col_pend = st.columns([2, 2])
+        with col_busca:
+            busca = st.text_input("🔍 Buscar aluno por nome")
+        with col_pend:
+            pendencia_opcoes = ["Todos"] + TIPOS_SIGNATARIO
+            pendencia_sel = st.selectbox("Filtrar por pendência de signatário", pendencia_opcoes)
+
+        # Preparar dados para exibição
+        df_lista = df_filtrado.copy()
+        df_lista["pendencias_texto"] = df_lista["pendencias"].apply(
+            lambda p: ", ".join(p) if p else ""
+        )
+
+        if pendencia_sel != "Todos":
+            df_lista = df_lista[
+                df_lista["pendencias"].apply(lambda p: pendencia_sel in p)
+            ]
+
         colunas_exibir = [
             "unidade", "matricula", "nome", "segmento",
-            "serie", "turma", "responsavel", "status_contrato",
+            "serie", "turma", "responsavel", "status_contrato", "pendencias_texto",
         ]
-        colunas_presentes = [c for c in colunas_exibir if c in df_filtrado.columns]
-        df_exibir = df_filtrado[colunas_presentes].sort_values(
+        colunas_presentes = [c for c in colunas_exibir if c in df_lista.columns]
+        df_exibir = df_lista[colunas_presentes].sort_values(
             ["unidade", "segmento", "serie", "nome"]
         )
 
-        busca = st.text_input("🔍 Buscar aluno por nome")
         if busca:
             df_exibir = df_exibir[
                 df_exibir["nome"].str.contains(busca, case=False, na=False)
@@ -272,6 +313,7 @@ def main():
                 "turma": "Turma",
                 "responsavel": "Responsável",
                 "status_contrato": "Status Contrato",
+                "pendencias_texto": "Pendências Signatário",
             },
         )
 
