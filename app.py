@@ -262,7 +262,7 @@ def main():
             alt.Tooltip("_Aguardando assinatura:Q", title="Aguardando assinatura"),
             alt.Tooltip("_Sem contrato:Q", title="Sem contrato"),
         ]
-        chart = (
+        bars = (
             alt.Chart(df_melt)
             .mark_bar()
             .encode(
@@ -276,8 +276,15 @@ def main():
                 xOffset="Status:N",
                 tooltip=tooltip,
             )
-            .properties(height=350)
         )
+        text = bars.mark_text(
+            align="center", baseline="middle", fontSize=12, fontWeight="bold", color="white"
+        ).encode(
+            text=alt.Text("Quantidade:Q"),
+        ).transform_filter(
+            alt.datum.Quantidade > 0
+        )
+        chart = (bars + text).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
 
     status_cols = ["Assinado", "Aguardando assinatura", "Sem contrato"]
@@ -422,7 +429,7 @@ def main():
             df_sig_chart = pivot_sig[["Sim", "Pendente"]].reset_index().melt(
                 id_vars="signatario", var_name="Status", value_name="Quantidade"
             )
-            chart_sig = (
+            bars_sig = (
                 alt.Chart(df_sig_chart)
                 .mark_bar()
                 .encode(
@@ -443,8 +450,15 @@ def main():
                         alt.Tooltip("Quantidade:Q", title="Quantidade"),
                     ],
                 )
-                .properties(height=350)
             )
+            text_sig = bars_sig.mark_text(
+                align="center", baseline="middle", fontSize=12, fontWeight="bold", color="white"
+            ).encode(
+                text=alt.Text("Quantidade:Q"),
+            ).transform_filter(
+                alt.datum.Quantidade > 0
+            )
+            chart_sig = (bars_sig + text_sig).properties(height=350)
             st.altair_chart(chart_sig, use_container_width=True)
 
             st.dataframe(pivot_sig, use_container_width=True)
