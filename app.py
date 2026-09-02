@@ -47,16 +47,32 @@ def carregar_dados():
         return json.load(f)
 
 
+def is_turma_regular(turma_nome):
+    if not turma_nome:
+        return True
+    return "integral" not in turma_nome.lower()
+
+
 def montar_dataframes(dados):
     alunos_all = []
     contratos_all = []
 
     for sigla, info in dados["unidades"].items():
         for a in info["alunos"]:
-            rec = {**a, "unidade": sigla, "segmento": extrair_segmento(a.get("curso"))}
+            rec = {
+                **a,
+                "unidade": sigla,
+                "segmento": extrair_segmento(a.get("curso")),
+                "tipo_turma": "Regular" if is_turma_regular(a.get("turma")) else "Integral",
+            }
             alunos_all.append(rec)
         for c in info["contratos"]:
-            rec = {**c, "unidade": sigla, "segmento": extrair_segmento(c.get("curso"))}
+            rec = {
+                **c,
+                "unidade": sigla,
+                "segmento": extrair_segmento(c.get("curso")),
+                "tipo_turma": "Regular" if is_turma_regular(c.get("turma")) else "Integral",
+            }
             contratos_all.append(rec)
 
     df_alunos = pd.DataFrame(alunos_all)
@@ -130,7 +146,7 @@ def main():
     df_alunos = build_summary(df_alunos, df_contratos)
 
     # ── Filtros ─────────────────────────────────────────────────────
-    col_f1, col_f2, col_f3 = st.columns(3)
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
         unidades_disp = sorted(df_alunos["unidade"].unique())
         unidades_sel = st.multiselect("Unidade", unidades_disp, default=unidades_disp)
@@ -143,11 +159,15 @@ def main():
     with col_f3:
         status_disp = ["Assinado", "Aguardando assinatura", "Sem contrato"]
         status_sel = st.multiselect("Status do Contrato", status_disp, default=status_disp)
+    with col_f4:
+        tipos_turma = sorted(df_alunos["tipo_turma"].unique())
+        tipos_sel = st.multiselect("Tipo de Turma", tipos_turma, default=["Regular"])
 
     mask = (
         df_alunos["unidade"].isin(unidades_sel)
         & df_alunos["segmento"].isin(segmentos_sel)
         & df_alunos["status_contrato"].isin(status_sel)
+        & df_alunos["tipo_turma"].isin(tipos_sel)
     )
     df_filtrado = df_alunos[mask]
 
