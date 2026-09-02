@@ -69,17 +69,17 @@ def classificar_aluno(at_id, contratos_do_aluno):
     if not contratos_do_aluno:
         return "Sem contrato"
 
-    # Filtrar apenas por situacao_assinatura (ignorar campo contrato_cancelado
-    # pois no SIGA vem True para todos os registros)
+    # Filtrar contratos ativos (excluir todos os tipos de cancelamento)
     ativos = [
         c for c in contratos_do_aluno
-        if c.get("situacao_assinatura") not in ("Contrato cancelado",)
+        if "cancelado" not in (c.get("situacao_assinatura") or "").lower()
+        and "falha" not in (c.get("situacao_assinatura") or "").lower()
     ]
 
     if not ativos:
         return "Sem contrato"
 
-    if any(c["situacao_assinatura"] == "Assinado" for c in ativos):
+    if any("assinado" in (c["situacao_assinatura"] or "").lower() for c in ativos):
         return "Assinado"
 
     if any(c["situacao_assinatura"] == "Aguardando assinatura" for c in ativos):
