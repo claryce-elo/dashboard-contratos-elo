@@ -125,17 +125,32 @@ def main():
     st.caption("Colégio ELO — Comparativo Matrículas x Contratos")
 
     dados = carregar_dados()
-    if dados is None:
-        st.error("Snapshot não encontrado. Execute `python coletar_dados.py` primeiro.")
-        return
 
-    coleta_em = dados.get("coleta_em", "")
-    if coleta_em:
-        try:
-            dt = datetime.fromisoformat(coleta_em)
-            st.caption(f"Última atualização: {dt.strftime('%d/%m/%Y %H:%M')}")
-        except Exception:
-            pass
+    # Header com última atualização e botão
+    col_header1, col_header2 = st.columns([3, 1])
+    with col_header1:
+        coleta_em = dados.get("coleta_em", "") if dados else ""
+        if coleta_em:
+            try:
+                dt = datetime.fromisoformat(coleta_em)
+                st.caption(f"Última atualização: {dt.strftime('%d/%m/%Y %H:%M')}")
+            except Exception:
+                pass
+    with col_header2:
+        if st.button("🔄 Atualizar agora", use_container_width=True):
+            with st.spinner("Coletando dados do SIGA..."):
+                try:
+                    from coletar_dados import main as coletar
+                    coletar()
+                    st.cache_data.clear()
+                    st.success("Dados atualizados!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro na coleta: {e}")
+
+    if dados is None:
+        st.error("Snapshot não encontrado. Clique em 'Atualizar agora'.")
+        return
 
     df_alunos, df_contratos = montar_dataframes(dados)
 

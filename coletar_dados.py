@@ -18,9 +18,15 @@ from pathlib import Path
 # ── Config ──────────────────────────────────────────────────────────
 BASE_URL = "https://siga02.activesoft.com.br"
 SIGA_LOGIN_URL = "https://siga.activesoft.com.br"
-INSTITUICAO = os.environ.get("SIGA_INSTITUICAO", "COLEGIOELO")
-LOGIN = os.environ.get("SIGA_LOGIN", "claryce")
-SENHA = os.environ.get("SIGA_SENHA", "Clary123@")
+try:
+    import streamlit as st
+    INSTITUICAO = st.secrets.get("SIGA_INSTITUICAO", "COLEGIOELO")
+    LOGIN = st.secrets.get("SIGA_LOGIN", "claryce")
+    SENHA = st.secrets.get("SIGA_SENHA", "Clary123@")
+except Exception:
+    INSTITUICAO = os.environ.get("SIGA_INSTITUICAO", "COLEGIOELO")
+    LOGIN = os.environ.get("SIGA_LOGIN", "claryce")
+    SENHA = os.environ.get("SIGA_SENHA", "Clary123@")
 PERIODO_SIGLA = "2027"
 
 UNIDADES = [
