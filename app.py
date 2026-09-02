@@ -252,9 +252,11 @@ def main():
         st.subheader("Signatários Pendentes")
         st.caption("Contratos aguardando assinatura — quem já assinou e quem falta")
 
-        # Montar tabela de signatários a partir dos contratos com signatarios
-        sig_rows = []
+        # Montar tabela de signatários — apenas o contrato MAIS RECENTE por aluno
         aluno_turma_ids_cursando = set(df_alunos["id_aluno_turma"].tolist())
+
+        # Selecionar o contrato mais recente (maior id) por aluno_turma_id
+        contratos_por_aluno = {}
         for _, c in df_contratos.iterrows():
             sigs = c.get("signatarios")
             if not sigs or not isinstance(sigs, list) or len(sigs) == 0:
@@ -266,7 +268,14 @@ def main():
             seg = c.get("segmento", "")
             if seg not in segmentos_sel:
                 continue
-            for s in sigs:
+            at_id = c.get("aluno_turma_id")
+            cid = c.get("id", 0)
+            if at_id not in contratos_por_aluno or cid > contratos_por_aluno[at_id].get("id", 0):
+                contratos_por_aluno[at_id] = c.to_dict()
+
+        sig_rows = []
+        for at_id, c in contratos_por_aluno.items():
+            for s in c.get("signatarios", []):
                 sig_rows.append({
                     "unidade": c.get("unidade"),
                     "matricula": c.get("matricula"),
