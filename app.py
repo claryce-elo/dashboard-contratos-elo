@@ -1,6 +1,7 @@
 import json
 import streamlit as st
 import pandas as pd
+import altair as alt
 from pathlib import Path
 from datetime import datetime
 
@@ -244,20 +245,56 @@ def main():
         pivot["% Assinado"] = (pivot["Assinado"] / pivot["Total"] * 100).round(1)
         return pivot
 
+    def grafico_barras(pivot, group_col, cores, status_cols):
+        """Gráfico de barras com tooltip customizado."""
+        df_melt = pivot[status_cols].reset_index().melt(
+            id_vars=group_col, var_name="Status", value_name="Quantidade"
+        )
+        # Adicionar totais para tooltip
+        totais = pivot[status_cols].reset_index()
+        df_melt = df_melt.merge(
+            totais.rename(columns={s: f"_{s}" for s in status_cols}),
+            on=group_col,
+        )
+        tooltip = [
+            alt.Tooltip(f"{group_col}:N", title=group_col.title()),
+            alt.Tooltip("_Assinado:Q", title="Assinados"),
+            alt.Tooltip("_Aguardando assinatura:Q", title="Aguardando assinatura"),
+            alt.Tooltip("_Sem contrato:Q", title="Sem contrato"),
+        ]
+        chart = (
+            alt.Chart(df_melt)
+            .mark_bar()
+            .encode(
+                x=alt.X(f"{group_col}:N", title=None, sort=list(pivot.index)),
+                y=alt.Y("Quantidade:Q", title="Alunos"),
+                color=alt.Color(
+                    "Status:N",
+                    scale=alt.Scale(domain=status_cols, range=cores),
+                    legend=alt.Legend(title="Status"),
+                ),
+                xOffset="Status:N",
+                tooltip=tooltip,
+            )
+            .properties(height=350)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    status_cols = ["Assinado", "Aguardando assinatura", "Sem contrato"]
+    cores_chart = ["#2ecc71", "#f39c12", "#e74c3c"]
+
     with tab1:
         st.subheader("Status dos Contratos por Unidade")
         pivot = fazer_pivot(df_filtrado, "unidade")
         if not pivot.empty:
-            chart_cols = ["Assinado", "Aguardando assinatura", "Sem contrato"]
-            st.bar_chart(pivot[chart_cols], color=["#2ecc71", "#f39c12", "#e74c3c"])
+            grafico_barras(pivot, "unidade", cores_chart, status_cols)
             st.dataframe(pivot, use_container_width=True)
 
     with tab2:
         st.subheader("Status dos Contratos por Segmento")
         pivot = fazer_pivot(df_filtrado, "segmento")
         if not pivot.empty:
-            chart_cols = ["Assinado", "Aguardando assinatura", "Sem contrato"]
-            st.bar_chart(pivot[chart_cols], color=["#2ecc71", "#f39c12", "#e74c3c"])
+            grafico_barras(pivot, "segmento", cores_chart, status_cols)
             st.dataframe(pivot, use_container_width=True)
 
     with tab3:
@@ -295,6 +332,11 @@ def main():
             df_exibir = df_exibir[
                 df_exibir["nome"].str.contains(busca, case=False, na=False)
             ]
+
+        # Numerar a lista
+        df_exibir = df_exibir.reset_index(drop=True)
+        df_exibir.index = df_exibir.index + 1
+        df_exibir.index.name = "Nº"
 
         def colorir_status(val):
             cor = STATUS_CORES.get(val, "")
@@ -375,6 +417,36 @@ def main():
             pivot_sig = pivot_sig[["Sim", "Pendente"]]
             pivot_sig["Total"] = pivot_sig.sum(axis=1)
             pivot_sig["% Assinado"] = (pivot_sig["Sim"] / pivot_sig["Total"] * 100).round(1)
+
+            # Gráfico de barras signatários
+            df_sig_chart = pivot_sig[["Sim", "Pendente"]].reset_index().melt(
+                id_vars="signatario", var_name="Status", value_name="Quantidade"
+            )
+            chart_sig = (
+                alt.Chart(df_sig_chart)
+                .mark_bar()
+                .encode(
+                    x=alt.X("signatario:N", title=None, sort=list(pivot_sig.index)),
+                    y=alt.Y("Quantidade:Q", title="Contratos"),
+                    color=alt.Color(
+                        "Status:N",
+                        scale=alt.Scale(
+                            domain=["Sim", "Pendente"],
+                            range=["#2ecc71", "#f39c12"],
+                        ),
+                        legend=alt.Legend(title="Status"),
+                    ),
+                    xOffset="Status:N",
+                    tooltip=[
+                        alt.Tooltip("signatario:N", title="Signatário"),
+                        alt.Tooltip("Status:N", title="Status"),
+                        alt.Tooltip("Quantidade:Q", title="Quantidade"),
+                    ],
+                )
+                .properties(height=350)
+            )
+            st.altair_chart(chart_sig, use_container_width=True)
+
             st.dataframe(pivot_sig, use_container_width=True)
 
             # Resumo por unidade x signatário
